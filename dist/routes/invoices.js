@@ -14,9 +14,10 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const database_1 = require("../database");
-const puppeteer_1 = __importDefault(require("puppeteer"));
+const puppeteer_core_1 = __importDefault(require("puppeteer-core"));
+const chromium_1 = __importDefault(require("@sparticuz/chromium"));
 const fs_1 = __importDefault(require("fs"));
-const path_1 = __importDefault(require("path"));
+const logo_1 = require("./logo");
 const router = (0, express_1.Router)();
 // GET all invoices
 router.get('/', (req, res) => __awaiter(void 0, void 0, void 0, function* () {
@@ -120,32 +121,20 @@ router.post('/', (req, res) => __awaiter(void 0, void 0, void 0, function* () {
 // GET PDF
 router.get('/:id/pdf', (req, res) => __awaiter(void 0, void 0, void 0, function* () {
     var _a, _b, _c;
+    let browser = null;
     try {
         const { id } = req.params;
-        const { data: invoice, error } = yield database_1.supabase
+        const { data: invoice, error: fetchErr } = yield database_1.supabase
             .from('billing_invoices')
             .select('*')
             .eq('_id', id)
             .maybeSingle();
-        if (error)
-            throw error;
+        if (fetchErr)
+            throw fetchErr;
         if (!invoice)
             return res.status(404).json({ error: 'Invoice not found' });
-        // Load logo as base64 Data URI
-        let logoDataUri = '';
-        try {
-            const logoPath = path_1.default.join(process.cwd(), '..', 'client', 'public', 'logo.png');
-            if (fs_1.default.existsSync(logoPath)) {
-                const logoBuffer = fs_1.default.readFileSync(logoPath);
-                logoDataUri = `data:image/png;base64,${logoBuffer.toString('base64')}`;
-            }
-            else {
-                console.warn('Logo file not found at:', logoPath);
-            }
-        }
-        catch (logoErr) {
-            console.error('Failed to load logo for PDF:', logoErr);
-        }
+        // Load logo as base64 Data URI from the static module logo.ts
+        const logoDataUri = logo_1.logoBase64 ? `data:image/png;base64,${logo_1.logoBase64}` : '';
         // HTML Template for PDF with Branding
         const htmlContent = `
         <!DOCTYPE html>
@@ -257,39 +246,71 @@ router.get('/:id/pdf', (req, res) => __awaiter(void 0, void 0, void 0, function*
         </body>
         </html>
         `;
-        // Search for system Chrome installation paths on Windows
-        const chromePaths = [
-            'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-            'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-            process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe` : null
-        ].filter(Boolean);
-        let executablePath;
-        for (const p of chromePaths) {
-            if (fs_1.default.existsSync(p)) {
-                executablePath = p;
-                console.log('Using system Chrome for PDF generation:', p);
-                break;
+        let executablePath = null;
+        let args = [];
+        // Automatic OS-detection fallback
+        if (process.platform === 'win32') {
+            // Windows: Search standard Chrome locations locally
+            const chromePaths = [
+                'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+                'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+                process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe` : null
+            ].filter(Boolean);
+            for (const p of chromePaths) {
+                if (fs_1.default.existsSync(p)) {
+                    executablePath = p;
+                    console.log('Using local system Chrome for PDF generation:', p);
+                    break;
+                }
+            }
+            args = ['--no-sandbox', '--disable-setuid-sandbox'];
+        }
+        else {
+            // Linux/Render: Use @sparticuz/chromium
+            try {
+                executablePath = yield chromium_1.default.executablePath();
+                args = chromium_1.default.args;
+                console.log('Using @sparticuz/chromium for PDF generation on Render');
+            }
+            catch (err) {
+                console.error('Failed to get @sparticuz/chromium executable path:', err);
             }
         }
-        const browser = yield puppeteer_1.default.launch({
-            headless: "new",
+        if (!executablePath) {
+            throw new Error('Chromium/Chrome executable not found. Unable to render PDF.');
+        }
+        // Launch Browser
+        browser = yield puppeteer_core_1.default.launch({
+            args,
             executablePath,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            headless: process.platform === 'win32' ? 'new' : true,
         });
         const page = yield browser.newPage();
         yield page.setContent(htmlContent);
         const pdfBuffer = yield page.pdf({ format: 'A4', printBackground: true });
+        // Close Browser
         yield browser.close();
+        browser = null; // Set to null so finally does not try to close it again
         res.set({
             'Content-Type': 'application/pdf',
             'Content-Length': pdfBuffer.length,
             'Content-Disposition': `attachment; filename=invoice-${invoice.invoiceNumber}.pdf`
         });
-        res.send(pdfBuffer);
+        res.send(Buffer.from(pdfBuffer));
     }
     catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Failed to generate PDF' });
+        console.error('PDF Generation Error:', error);
+        res.status(500).json({ error: `Failed to generate PDF: ${error.message || error}` });
+    }
+    finally {
+        if (browser !== null) {
+            try {
+                yield browser.close();
+            }
+            catch (closeErr) {
+                console.error('Error closing browser in finally block:', closeErr);
+            }
+        }
     }
 }));
 exports.default = router;

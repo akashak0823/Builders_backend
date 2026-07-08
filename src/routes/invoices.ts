@@ -1,8 +1,10 @@
 import { Router } from 'express';
 import { supabase } from '../database';
-import puppeteer from 'puppeteer';
+import puppeteer from 'puppeteer-core';
+import chromium from '@sparticuz/chromium';
 import fs from 'fs';
 import path from 'path';
+import { logoBase64 } from './logo';
 
 const router = Router();
 
@@ -122,31 +124,21 @@ router.post('/', async (req, res) => {
 
 // GET PDF
 router.get('/:id/pdf', async (req, res) => {
+    let browser: any = null;
     try {
         const { id } = req.params;
         
-        const { data: invoice, error } = await supabase
+        const { data: invoice, error: fetchErr } = await supabase
             .from('billing_invoices')
             .select('*')
             .eq('_id', id)
             .maybeSingle();
 
-        if (error) throw error;
+        if (fetchErr) throw fetchErr;
         if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
 
-        // Load logo as base64 Data URI
-        let logoDataUri = '';
-        try {
-            const logoPath = path.join(process.cwd(), '..', 'client', 'public', 'logo.png');
-            if (fs.existsSync(logoPath)) {
-                const logoBuffer = fs.readFileSync(logoPath);
-                logoDataUri = `data:image/png;base64,${logoBuffer.toString('base64')}`;
-            } else {
-                console.warn('Logo file not found at:', logoPath);
-            }
-        } catch (logoErr) {
-            console.error('Failed to load logo for PDF:', logoErr);
-        }
+        // Load logo as base64 Data URI from the static module logo.ts
+        const logoDataUri = logoBase64 ? `data:image/png;base64,${logoBase64}` : '';
 
         // HTML Template for PDF with Branding
         const htmlContent = `
@@ -260,42 +252,74 @@ router.get('/:id/pdf', async (req, res) => {
         </html>
         `;
 
-        // Search for system Chrome installation paths on Windows
-        const chromePaths = [
-            'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-            'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-            process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe` : null
-        ].filter(Boolean) as string[];
+        let executablePath: string | null = null;
+        let args: string[] = [];
 
-        let executablePath: string | undefined;
-        for (const p of chromePaths) {
-            if (fs.existsSync(p)) {
-                executablePath = p;
-                console.log('Using system Chrome for PDF generation:', p);
-                break;
+        // Automatic OS-detection fallback
+        if (process.platform === 'win32') {
+            // Windows: Search standard Chrome locations locally
+            const chromePaths = [
+                'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+                'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+                process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe` : null
+            ].filter(Boolean) as string[];
+
+            for (const p of chromePaths) {
+                if (fs.existsSync(p)) {
+                    executablePath = p;
+                    console.log('Using local system Chrome for PDF generation:', p);
+                    break;
+                }
+            }
+            args = ['--no-sandbox', '--disable-setuid-sandbox'];
+        } else {
+            // Linux/Render: Use @sparticuz/chromium
+            try {
+                executablePath = await chromium.executablePath();
+                args = chromium.args;
+                console.log('Using @sparticuz/chromium for PDF generation on Render');
+            } catch (err: any) {
+                console.error('Failed to get @sparticuz/chromium executable path:', err);
             }
         }
 
-        const browser = await puppeteer.launch({ 
-            headless: "new",
+        if (!executablePath) {
+            throw new Error('Chromium/Chrome executable not found. Unable to render PDF.');
+        }
+
+        // Launch Browser
+        browser = await puppeteer.launch({ 
+            args,
             executablePath,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+            headless: process.platform === 'win32' ? 'new' as any : true,
         });
+
         const page = await browser.newPage();
         await page.setContent(htmlContent);
         const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });
+
+        // Close Browser
         await browser.close();
+        browser = null; // Set to null so finally does not try to close it again
 
         res.set({
             'Content-Type': 'application/pdf',
             'Content-Length': pdfBuffer.length,
             'Content-Disposition': `attachment; filename=invoice-${invoice.invoiceNumber}.pdf`
         });
-        res.send(pdfBuffer);
+        res.send(Buffer.from(pdfBuffer));
 
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Failed to generate PDF' });
+    } catch (error: any) {
+        console.error('PDF Generation Error:', error);
+        res.status(500).json({ error: `Failed to generate PDF: ${error.message || error}` });
+    } finally {
+        if (browser !== null) {
+            try {
+                await browser.close();
+            } catch (closeErr) {
+                console.error('Error closing browser in finally block:', closeErr);
+            }
+        }
     }
 });
 
