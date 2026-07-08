@@ -14,7 +14,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = require("express");
 const multer_1 = __importDefault(require("multer"));
-const cloudinary_1 = __importDefault(require("../config/cloudinary"));
+const database_1 = require("../database");
 const router = (0, express_1.Router)();
 const upload = (0, multer_1.default)({ storage: multer_1.default.memoryStorage() });
 router.post('/', upload.single('image'), (req, res) => __awaiter(void 0, void 0, void 0, function* () {
@@ -22,18 +22,31 @@ router.post('/', upload.single('image'), (req, res) => __awaiter(void 0, void 0,
         if (!req.file) {
             return res.status(400).json({ error: 'No image file provided' });
         }
-        // Convert buffer to base64
-        const b64 = Buffer.from(req.file.buffer).toString('base64');
-        let dataURI = "data:" + req.file.mimetype + ";base64," + b64;
-        const result = yield cloudinary_1.default.uploader.upload(dataURI, {
-            folder: 'Builders Bazaar',
-            resource_type: 'auto'
+        // Generate unique filename
+        const ext = req.file.originalname.split('.').pop() || 'jpg';
+        const fileName = `${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${ext}`;
+        // Upload to Supabase Storage Bucket 'Products'
+        const { data, error } = yield database_1.supabase.storage
+            .from('Products')
+            .upload(fileName, req.file.buffer, {
+            contentType: req.file.mimetype,
+            upsert: true
         });
-        res.json({ url: result.secure_url });
+        if (error) {
+            throw error;
+        }
+        // Get public URL
+        const { data: publicUrlData } = database_1.supabase.storage
+            .from('Products')
+            .getPublicUrl(fileName);
+        if (!publicUrlData || !publicUrlData.publicUrl) {
+            throw new Error('Failed to get public URL');
+        }
+        res.json({ url: publicUrlData.publicUrl });
     }
     catch (error) {
         console.error('Upload Error:', error);
-        res.status(500).json({ error: 'Image upload failed' });
+        res.status(500).json({ error: 'Image upload failed: ' + (error.message || error) });
     }
 }));
 exports.default = router;

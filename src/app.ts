@@ -25,7 +25,7 @@ app.use('/upload', uploadRoutes);
 app.use('/dashboard', dashboardRoutes);
 
 app.get('/', (req, res) => {
-    res.send('builders bazaar Billing API is running (MongoDB).');
+    res.send('Builders Bazaar Billing API is running (Supabase).');
 });
 
 app.listen(PORT, () => {

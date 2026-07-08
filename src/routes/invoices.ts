@@ -1,15 +1,23 @@
 import { Router } from 'express';
-import { Invoice, Product } from '../database';
+import { supabase } from '../database';
 import puppeteer from 'puppeteer';
+import fs from 'fs';
+import path from 'path';
 
 const router = Router();
 
 // GET all invoices
 router.get('/', async (req, res) => {
     try {
-        const invoices = await Invoice.find().sort({ createdAt: -1 });
+        const { data: invoices, error } = await supabase
+            .from('billing_invoices')
+            .select('*')
+            .order('createdAt', { ascending: false });
+
+        if (error) throw error;
         res.json(invoices);
     } catch (error) {
+        console.error('Fetch invoices error:', error);
         res.status(500).json({ error: 'Failed to fetch invoices' });
     }
 });
@@ -31,7 +39,16 @@ router.post('/', async (req, res) => {
         const invoiceItemsData = [];
         for (const item of items) {
             console.log('Processing item:', item.productId);
-            const product = await Product.findById(item.productId);
+            
+            // Find product by id (using UUID)
+            const { data: product, error: productErr } = await supabase
+                .from('billing_products')
+                .select('*')
+                .eq('_id', item.productId)
+                .maybeSingle();
+
+            if (productErr) throw productErr;
+
             if (product) {
                 console.log('Found product:', product.name, 'Quantity:', product.quantity);
                 const currentQty = product.quantity || 0;
@@ -39,17 +56,28 @@ router.post('/', async (req, res) => {
                     console.error('Insufficient stock');
                     return res.status(400).json({ error: `Insufficient stock for ${product.name}` });
                 }
-                product.quantity = currentQty - item.quantity;
-                if (product.quantity === 0) {
-                    product.inStock = false;
-                }
+                
+                const updatedQty = currentQty - item.quantity;
+                const inStock = updatedQty > 0;
 
                 // Fix for legacy products missing productId
-                if (!product.productId) {
-                    product.productId = `PROD-${product._id.toString().slice(-6).toUpperCase()}`;
+                let prodId = product.productId;
+                if (!prodId) {
+                    prodId = `PROD-${product._id.slice(-6).toUpperCase()}`;
                 }
 
-                await product.save();
+                // Update product in DB
+                const { error: updateErr } = await supabase
+                    .from('billing_products')
+                    .update({
+                        quantity: updatedQty,
+                        inStock,
+                        productId: prodId,
+                        updatedAt: new Date()
+                    })
+                    .eq('_id', product._id);
+
+                if (updateErr) throw updateErr;
                 console.log('Product updated');
             } else {
                 console.warn('Product not found for ID:', item.productId);
@@ -69,17 +97,21 @@ router.post('/', async (req, res) => {
         const grandTotal = subtotal + totalGst;
         const invoiceNumber = `INV-${Date.now()}`;
 
-        const invoice = new Invoice({
-            invoiceNumber,
-            date: date || new Date(),
-            customer,
-            items: invoiceItemsData,
-            subtotal,
-            totalGst,
-            grandTotal
-        });
+        const { data: invoice, error: insertErr } = await supabase
+            .from('billing_invoices')
+            .insert({
+                invoiceNumber,
+                date: date || new Date(),
+                customer, // JSONB
+                items: invoiceItemsData, // JSONB
+                subtotal,
+                totalGst,
+                grandTotal
+            })
+            .select()
+            .single();
 
-        await invoice.save();
+        if (insertErr) throw insertErr;
         res.status(201).json(invoice);
 
     } catch (error) {
@@ -92,9 +124,29 @@ router.post('/', async (req, res) => {
 router.get('/:id/pdf', async (req, res) => {
     try {
         const { id } = req.params;
-        const invoice = await Invoice.findById(id);
+        
+        const { data: invoice, error } = await supabase
+            .from('billing_invoices')
+            .select('*')
+            .eq('_id', id)
+            .maybeSingle();
 
+        if (error) throw error;
         if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+
+        // Load logo as base64 Data URI
+        let logoDataUri = '';
+        try {
+            const logoPath = path.join(process.cwd(), '..', 'client', 'public', 'logo.png');
+            if (fs.existsSync(logoPath)) {
+                const logoBuffer = fs.readFileSync(logoPath);
+                logoDataUri = `data:image/png;base64,${logoBuffer.toString('base64')}`;
+            } else {
+                console.warn('Logo file not found at:', logoPath);
+            }
+        } catch (logoErr) {
+            console.error('Failed to load logo for PDF:', logoErr);
+        }
 
         // HTML Template for PDF with Branding
         const htmlContent = `
@@ -104,7 +156,7 @@ router.get('/:id/pdf', async (req, res) => {
             <style>
                 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap');
                 body { font-family: 'Montserrat', sans-serif; padding: 40px; color: #1E3353; }
-                .header { display: flex; justify-content: space-between; margin-bottom: 40px; border-bottom: 2px solid #F2C23E; padding-bottom: 20px; }
+                .header { display: flex; justify-content: space-between; margin-bottom: 40px; border-bottom: 2px solid #F2C23E; padding-bottom: 20px; align-items: center; }
                 .logo-text { font-size: 28px; font-weight: 800; color: #1E3353; }
                 .logo-accent { color: #F2C23E; }
                 .company-details { font-size: 12px; color: #3F4A5A; margin-top: 5px; }
@@ -129,12 +181,15 @@ router.get('/:id/pdf', async (req, res) => {
         </head>
         <body>
             <div class="header">
-                <div>
-                    <div class="logo-text">BUILDERS <span class="logo-accent">BAZAAR</span></div>
-                    <div class="company-details">
-                        123 Construction Lane, Business City<br>
-                        State, India - 560001<br>
-                        GSTIN: 29ABCDE1234F1Z5
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    ${logoDataUri ? `<img src="${logoDataUri}" style="height: 55px; width: auto;" />` : ''}
+                    <div>
+                        <div class="logo-text">BUILDERS <span class="logo-accent">BAZAAR</span></div>
+                        <div class="company-details">
+                            123 Construction Lane, Business City<br>
+                            State, India - 560001<br>
+                            GSTIN: 29ABCDE1234F1Z5
+                        </div>
                     </div>
                 </div>
                 <div>
@@ -172,11 +227,11 @@ router.get('/:id/pdf', async (req, res) => {
                         <td>${item.productName}</td>
                         <td>${item.hsnCode || '-'}</td>
                         <td>${item.quantity}</td>
-                        <td>${item.unitPrice.toFixed(2)}</td>
-                        <td>${(item.quantity * item.unitPrice).toFixed(2)}</td>
+                        <td>${Number(item.unitPrice).toFixed(2)}</td>
+                        <td>${(item.quantity * Number(item.unitPrice)).toFixed(2)}</td>
                         <td>${item.gstRate}%</td>
-                        <td>${item.gstAmount.toFixed(2)}</td>
-                        <td>${item.totalAmount.toFixed(2)}</td>
+                        <td>${Number(item.gstAmount).toFixed(2)}</td>
+                        <td>${Number(item.totalAmount).toFixed(2)}</td>
                     </tr>
                     `).join('')}
                 </tbody>
@@ -185,15 +240,15 @@ router.get('/:id/pdf', async (req, res) => {
             <div class="totals">
                 <div class="total-row">
                     <span>Subtotal:</span>
-                    <span>${invoice.subtotal.toFixed(2)}</span>
+                    <span>${Number(invoice.subtotal).toFixed(2)}</span>
                 </div>
                 <div class="total-row">
                     <span>Total GST:</span>
-                    <span>${invoice.totalGst.toFixed(2)}</span>
+                    <span>${Number(invoice.totalGst).toFixed(2)}</span>
                 </div>
                 <div class="total-row grand-total">
                     <span>Grand Total:</span>
-                    <span>₹${invoice.grandTotal.toFixed(2)}</span>
+                    <span>₹${Number(invoice.grandTotal).toFixed(2)}</span>
                 </div>
             </div>
 
@@ -205,7 +260,27 @@ router.get('/:id/pdf', async (req, res) => {
         </html>
         `;
 
-        const browser = await puppeteer.launch({ headless: "new" });
+        // Search for system Chrome installation paths on Windows
+        const chromePaths = [
+            'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+            'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+            process.env.LOCALAPPDATA ? `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe` : null
+        ].filter(Boolean) as string[];
+
+        let executablePath: string | undefined;
+        for (const p of chromePaths) {
+            if (fs.existsSync(p)) {
+                executablePath = p;
+                console.log('Using system Chrome for PDF generation:', p);
+                break;
+            }
+        }
+
+        const browser = await puppeteer.launch({ 
+            headless: "new",
+            executablePath,
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        });
         const page = await browser.newPage();
         await page.setContent(htmlContent);
         const pdfBuffer = await page.pdf({ format: 'A4', printBackground: true });

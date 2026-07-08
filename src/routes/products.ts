@@ -1,14 +1,19 @@
 import { Router } from 'express';
-import { Product } from '../database';
+import { supabase } from '../database';
 
 const router = Router();
 
 // GET all products
 router.get('/', async (req, res) => {
     try {
-        const products = await Product.find();
+        const { data: products, error } = await supabase
+            .from('billing_products')
+            .select('*');
+
+        if (error) throw error;
         res.json(products);
     } catch (error) {
+        console.error('Fetch products error:', error);
         res.status(500).json({ error: 'Failed to fetch products' });
     }
 });
@@ -17,10 +22,28 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
     try {
         const { name, productId, image, category, quantity, inStock, unit, basePrice, gstRate, hsnCode } = req.body;
-        const product = new Product({ name, productId, image, category, quantity, inStock, unit, basePrice, gstRate, hsnCode });
-        await product.save();
+        
+        const { data: product, error } = await supabase
+            .from('billing_products')
+            .insert({
+                name,
+                productId,
+                image,
+                category,
+                quantity: quantity !== undefined ? Number(quantity) : 0,
+                inStock: inStock !== undefined ? inStock : true,
+                unit,
+                basePrice: Number(basePrice),
+                gstRate: Number(gstRate),
+                hsnCode
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
         res.status(201).json(product);
     } catch (error) {
+        console.error('Create product error:', error);
         res.status(500).json({ error: 'Failed to create product' });
     }
 });
@@ -34,19 +57,35 @@ router.put('/:id', async (req, res) => {
         // Auto-update inStock based on quantity if not explicitly provided
         let stockStatus = inStock;
         if (quantity !== undefined) {
-            stockStatus = quantity > 0;
+            stockStatus = Number(quantity) > 0;
         }
 
-        const product = await Product.findByIdAndUpdate(
-            id,
-            { name, productId, image, category, quantity, inStock: stockStatus, unit, basePrice, gstRate, hsnCode },
-            { new: true }
-        );
+        const { data: product, error } = await supabase
+            .from('billing_products')
+            .update({
+                name,
+                productId,
+                image,
+                category,
+                quantity: quantity !== undefined ? Number(quantity) : undefined,
+                inStock: stockStatus,
+                unit,
+                basePrice: basePrice !== undefined ? Number(basePrice) : undefined,
+                gstRate: gstRate !== undefined ? Number(gstRate) : undefined,
+                hsnCode,
+                updatedAt: new Date()
+            })
+            .eq('_id', id)
+            .select()
+            .maybeSingle();
+
+        if (error) throw error;
         if (!product) {
             return res.status(404).json({ error: 'Product not found' });
         }
         res.json(product);
     } catch (error) {
+        console.error('Update product error:', error);
         res.status(500).json({ error: 'Failed to update product' });
     }
 });
@@ -55,12 +94,20 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const product = await Product.findByIdAndDelete(id);
-        if (!product) {
+        
+        const { data: data, error } = await supabase
+            .from('billing_products')
+            .delete()
+            .eq('_id', id)
+            .select();
+
+        if (error) throw error;
+        if (!data || data.length === 0) {
             return res.status(404).json({ error: 'Product not found' });
         }
         res.json({ message: 'Product deleted successfully' });
     } catch (error) {
+        console.error('Delete product error:', error);
         res.status(500).json({ error: 'Failed to delete product' });
     }
 });

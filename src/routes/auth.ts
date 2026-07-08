@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { User } from '../database';
+import { supabase } from '../database';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 
@@ -12,7 +12,14 @@ router.post('/register', async (req, res) => {
         const { name, email, password } = req.body;
 
         // Check if user exists
-        const existingUser = await User.findOne({ email });
+        const { data: existingUser, error: checkError } = await supabase
+            .from('billing_users')
+            .select('*')
+            .eq('email', email)
+            .maybeSingle();
+
+        if (checkError) throw checkError;
+
         if (existingUser) {
             return res.status(400).json({ error: 'User already exists' });
         }
@@ -22,13 +29,18 @@ router.post('/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, salt);
 
         // Create user
-        const user = new User({
-            name,
-            email,
-            password: hashedPassword
-        });
+        const { data: user, error: insertError } = await supabase
+            .from('billing_users')
+            .insert({
+                name,
+                email,
+                password: hashedPassword,
+                role: 'user'
+            })
+            .select()
+            .single();
 
-        await user.save();
+        if (insertError) throw insertError;
 
         // Create token
         const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '1d' });
@@ -43,6 +55,7 @@ router.post('/register', async (req, res) => {
             }
         });
     } catch (error) {
+        console.error('Registration error:', error);
         res.status(500).json({ error: 'Failed to register user' });
     }
 });
@@ -53,7 +66,14 @@ router.post('/login', async (req, res) => {
         const { email, password } = req.body;
 
         // Check user
-        const user = await User.findOne({ email });
+        const { data: user, error: checkError } = await supabase
+            .from('billing_users')
+            .select('*')
+            .eq('email', email)
+            .maybeSingle();
+
+        if (checkError) throw checkError;
+
         if (!user) {
             return res.status(400).json({ error: 'Invalid credentials' });
         }
@@ -77,6 +97,7 @@ router.post('/login', async (req, res) => {
             }
         });
     } catch (error) {
+        console.error('Login error:', error);
         res.status(500).json({ error: 'Failed to login' });
     }
 });
@@ -90,7 +111,14 @@ router.get('/me', async (req, res) => {
         }
 
         const decoded: any = jwt.verify(token, JWT_SECRET);
-        const user = await User.findById(decoded.id).select('-password');
+
+        const { data: user, error: findError } = await supabase
+            .from('billing_users')
+            .select('_id, name, email, role, createdAt, updatedAt')
+            .eq('_id', decoded.id)
+            .maybeSingle();
+
+        if (findError) throw findError;
 
         if (!user) {
             return res.status(404).json({ error: 'User not found' });
@@ -98,6 +126,7 @@ router.get('/me', async (req, res) => {
 
         res.json(user);
     } catch (error) {
+        console.error('Me error:', error);
         res.status(401).json({ error: 'Token is not valid' });
     }
 });

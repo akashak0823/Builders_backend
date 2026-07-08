@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { Invoice, Product } from '../database';
+import { supabase } from '../database';
 
 const router = Router();
 
@@ -7,33 +7,41 @@ const router = Router();
 router.get('/stats', async (req, res) => {
     try {
         // 1. Total Revenue (Sum of grandTotal of all invoices)
-        const revenueResult = await Invoice.aggregate([
-            {
-                $group: {
-                    _id: null,
-                    totalRevenue: { $sum: "$grandTotal" }
-                }
-            }
-        ]);
-        const totalRevenue = revenueResult.length > 0 ? revenueResult[0].totalRevenue : 0;
+        const { data: invoices, error: revError } = await supabase
+            .from('billing_invoices')
+            .select('grandTotal');
+
+        if (revError) throw revError;
+        const totalRevenue = invoices ? invoices.reduce((sum, inv) => sum + Number(inv.grandTotal), 0) : 0;
 
         // 2. Total Invoices Count
-        const totalInvoices = await Invoice.countDocuments();
+        const { count: totalInvoices, error: countInvError } = await supabase
+            .from('billing_invoices')
+            .select('*', { count: 'exact', head: true });
+
+        if (countInvError) throw countInvError;
 
         // 3. Total Products Count
-        const totalProducts = await Product.countDocuments();
+        const { count: totalProducts, error: countProdError } = await supabase
+            .from('billing_products')
+            .select('*', { count: 'exact', head: true });
+
+        if (countProdError) throw countProdError;
 
         // 4. Recent Invoices (Limit 5)
-        const recentInvoices = await Invoice.find()
-            .sort({ createdAt: -1 })
-            .limit(5)
-            .select('invoiceNumber customer grandTotal createdAt status'); // Select only needed fields
+        const { data: recentInvoices, error: recentError } = await supabase
+            .from('billing_invoices')
+            .select('_id, invoiceNumber, customer, grandTotal, createdAt')
+            .order('createdAt', { ascending: false })
+            .limit(5);
+
+        if (recentError) throw recentError;
 
         res.json({
             totalRevenue,
-            totalInvoices,
-            totalProducts,
-            recentInvoices
+            totalInvoices: totalInvoices || 0,
+            totalProducts: totalProducts || 0,
+            recentInvoices: recentInvoices || []
         });
 
     } catch (error) {

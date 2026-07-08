@@ -24,8 +24,9 @@ app.use('/invoices', invoices_1.default);
 app.use('/upload', upload_1.default);
 app.use('/dashboard', dashboard_1.default);
 app.get('/', (req, res) => {
-    res.send('builders bazaar Billing API is running (MongoDB).');
+    res.send('Builders Bazaar Billing API is running (Supabase).');
 });
 app.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
+    // Server started
 });
